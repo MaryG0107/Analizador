@@ -65,3 +65,5 @@ el servidor avisa a todos los navegadores conectados por medio de
 Socket.IO (`questions:changed`, `responses:changed`, `config:changed`).
 Cada navegador vuelve a pedir los datos actualizados y redibuja el
 dashboard — asi todos ven los mismos numeros al instante.
+
+# anlizadore-encuesta
