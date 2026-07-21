@@ -1,0 +1,19 @@
+{
+  "name": "analizador-encuestas",
+  "version": "1.0.0",
+  "description": "Aplicacion web para capturar y analizar encuestas en tiempo real, con backend compartido para varios usuarios a la vez.",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "mammoth": "^1.7.2",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.5",
+    "xlsx": "^0.18.5"
+  }
+}
