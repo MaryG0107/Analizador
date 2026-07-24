@@ -1,19 +1,16 @@
+require('dotenv').config();
 const assert = require('assert');
-const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { Pool } = require('pg');
 
 const PORT = 4173;
-const dbPath = path.join(os.tmpdir(), `analizador-test-server-${process.pid}.sqlite`);
-for (const ext of ['', '-shm', '-wal']) {
-  try { fs.unlinkSync(dbPath + ext); } catch {}
-}
+const testSchema = `test_server_${process.pid}`;
 
 const serverEntry = path.join(__dirname, '..', 'server', 'index.js');
 const child = spawn(process.execPath, [serverEntry], {
   cwd: path.join(__dirname, '..'),
-  env: { ...process.env, PORT: String(PORT), DB_PATH: dbPath },
+  env: { ...process.env, PORT: String(PORT), DB_SCHEMA: testSchema },
   stdio: ['ignore', 'pipe', 'pipe']
 });
 
@@ -21,11 +18,11 @@ let serverOutput = '';
 child.stdout.on('data', chunk => { serverOutput += chunk; });
 child.stderr.on('data', chunk => { serverOutput += chunk; });
 
-function cleanup() {
+async function cleanup() {
   child.kill();
-  for (const ext of ['', '-shm', '-wal']) {
-    try { fs.unlinkSync(dbPath + ext); } catch {}
-  }
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  await pool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
+  await pool.end();
 }
 
 async function waitForServer(url, attempts = 30, delayMs = 250) {
@@ -54,6 +51,6 @@ async function waitForServer(url, attempts = 30, delayMs = 250) {
     console.error(err);
     process.exitCode = 1;
   } finally {
-    cleanup();
+    await cleanup();
   }
 })();

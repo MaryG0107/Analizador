@@ -24,9 +24,9 @@ actualiza en vivo para todos gracias a Socket.IO.
 
 ```
 survey-app/
-  server/            backend (Node.js + Express + SQLite)
+  server/            backend (Node.js + Express + PostgreSQL)
     index.js          punto de entrada, wiring de rutas y Socket.IO
-    db.js              acceso a la base de datos SQLite
+    db.js              acceso a la base de datos PostgreSQL (driver pg)
     parser.js          parser de preguntas desde texto de Word (.docx)
     questionTypes.js   tipos de pregunta (mc / multi / yesno) — extensible
     stats.js           calculo de estadisticas (para exportar)
@@ -35,15 +35,17 @@ survey-app/
     index.html
     app.js
     styles.css
-  data.sqlite         base de datos (se crea sola al iniciar)
+  .env                DATABASE_URL y demas variables de entorno (no se versiona)
 ```
 
 ## Correr en tu computadora
 
-Requisitos: [Node.js](https://nodejs.org) 18 o mas reciente.
+Requisitos: [Node.js](https://nodejs.org) 18 o mas reciente, y una base de datos
+PostgreSQL accesible (local o en la nube).
 
 ```bash
 cd survey-app
+cp .env.example .env   # y edita DATABASE_URL con tu connection string real
 npm install
 npm start
 ```
@@ -67,12 +69,10 @@ basico:
 3. **Un VPS propio**: subes la carpeta, corres `npm install && npm start`,
    e idealmente usas `pm2` para mantenerlo corriendo.
 
-La base de datos es un archivo SQLite (`data.sqlite`) que vive junto al
-servidor — en la mayoria de estos hostings gratuitos el disco no es
-permanente entre reinicios, asi que para uso serio y prolongado
-te recomendaria migrar a una base de datos administrada (por ejemplo
-Postgres en Render o Supabase) cuando llegues a ese punto; puedo
-ayudarte a hacer ese cambio cuando lo necesites.
+La base de datos es PostgreSQL, configurada mediante la variable de entorno
+`DATABASE_URL`. En estos hostings puedes usar su addon de Postgres (Render,
+Railway) o un proveedor administrado como Neon o Supabase — solo asigna esa
+URL de conexión como variable de entorno del servicio.
 
 ## Como funciona el tiempo real
 
