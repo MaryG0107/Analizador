@@ -45,16 +45,26 @@ PostgreSQL accesible (local o en la nube).
 
 ```bash
 cd survey-app
-cp .env.example .env   # y edita DATABASE_URL con tu connection string real
+cp .env.example .env   # y edita DATABASE_URL, ADMIN_USER, ADMIN_PASSWORD y SESSION_SECRET
 npm install
 npm start
 ```
 
-Abre `http://localhost:3000` en tu navegador. Para probar el modo
+Abre `http://localhost:3000` en tu navegador e inicia sesion con el
+`ADMIN_USER`/`ADMIN_PASSWORD` que configuraste en `.env`. Para probar el modo
 "multi-usuario", abre la misma URL en dos pestañas o desde otra
 computadora en la misma red usando tu IP local
 (`http://TU-IP-LOCAL:3000`) — veras el dashboard actualizarse en ambas
-al mismo tiempo.
+al mismo tiempo (cada persona debe iniciar sesion con las mismas credenciales
+compartidas).
+
+## Autenticacion
+
+Toda la app (preguntas, captura y analisis) esta protegida por una sesion de
+servidor: sin iniciar sesion con `ADMIN_USER`/`ADMIN_PASSWORD`, la API
+responde `401` y no se puede leer ni modificar nada (ver `server/auth.js` y
+`test/auth.test.js`). Por ahora es un solo usuario compartido por todo el
+equipo — roles con permisos distintos por persona queda como mejora futura.
 
 ## Subir esto a un hosting (para que varias personas lo usen desde internet)
 

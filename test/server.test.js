@@ -39,13 +39,13 @@ async function waitForServer(url, attempts = 30, delayMs = 250) {
 
 (async () => {
   try {
-    const res = await waitForServer(`http://localhost:${PORT}/api/config`);
+    const res = await waitForServer(`http://localhost:${PORT}/api/session`);
     assert.strictEqual(res.status, 200, `se esperaba status 200, se obtuvo ${res.status}`);
 
     const body = await res.json();
-    assert.ok(typeof body.target === 'number', 'la respuesta de /api/config debe incluir "target" numérico');
+    assert.strictEqual(body.authenticated, false, 'sin haber iniciado sesión, /api/session debe indicar authenticated:false');
 
-    console.log('server.test.js: OK — el servidor arranca y responde en /api/config');
+    console.log('server.test.js: OK — el servidor arranca y responde en /api/session');
   } catch (err) {
     console.error('server.test.js: FALLÓ');
     console.error(err);
