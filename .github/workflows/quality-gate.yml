@@ -12,6 +12,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
       - name: Validate required documentation
         run: |
           test -f README.md
@@ -24,7 +30,8 @@ jobs:
           grep -q "CTQ" docs/quality/CTQ.md
           grep -q "Definition of Done" docs/quality/DoD.md
 
-      - name: Optional project test command
-        run: |
-          echo "Agregar aquí npm test, pytest, dotnet test, mvn test, etc."
-          echo "Gate inicial completado"
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite
+        run: npm test
