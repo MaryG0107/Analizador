@@ -1,65 +1,105 @@
-const path = require('path');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 
-const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'data.sqlite');
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
+const schema = process.env.DB_SCHEMA || 'public';
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  options: `-c search_path=${schema}`
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS questions (
-    id TEXT PRIMARY KEY,
-    text TEXT NOT NULL,
-    type TEXT NOT NULL,
-    options TEXT NOT NULL,
-    depends_on TEXT,
-    position INTEGER NOT NULL
-  );
+async function init() {
+  if (schema !== 'public') {
+    await pool.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS questions (
+      id TEXT PRIMARY KEY,
+      text TEXT NOT NULL,
+      type TEXT NOT NULL,
+      options TEXT NOT NULL,
+      depends_on TEXT,
+      position INTEGER NOT NULL
+    );
 
-  CREATE TABLE IF NOT EXISTS responses (
-    id TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    answers TEXT NOT NULL DEFAULT '{}'
-  );
+    CREATE TABLE IF NOT EXISTS responses (
+      id TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      answers TEXT NOT NULL DEFAULT '{}'
+    );
 
-  CREATE TABLE IF NOT EXISTS config (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-`);
-
-/* ---------------------------- Questions ---------------------------------- */
-function listQuestions() {
-  return db.prepare('SELECT * FROM questions ORDER BY position ASC').all().map(rowToQuestion);
+    CREATE TABLE IF NOT EXISTS config (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
 }
 
-function insertQuestion(q) {
-  const position = db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM questions').get().p;
-  db.prepare('INSERT INTO questions (id, text, type, options, depends_on, position) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(q.id, q.text, q.type, JSON.stringify(q.options), q.dependsOn ? JSON.stringify(q.dependsOn) : null, position);
+const ready = init();
+
+/* ---------------------------- Questions ---------------------------------- */
+async function listQuestions() {
+  await ready;
+  const { rows } = await pool.query('SELECT * FROM questions ORDER BY position ASC');
+  return rows.map(rowToQuestion);
+}
+
+async function insertQuestion(q) {
+  await ready;
+  const { rows: posRows } = await pool.query('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM questions');
+  const position = posRows[0].p;
+  await pool.query(
+    'INSERT INTO questions (id, text, type, options, depends_on, position) VALUES ($1, $2, $3, $4, $5, $6)',
+    [q.id, q.text, q.type, JSON.stringify(q.options), q.dependsOn ? JSON.stringify(q.dependsOn) : null, position]
+  );
   return getQuestion(q.id);
 }
 
-function insertQuestionsBulk(questions) {
-  const tx = db.transaction(qs => qs.map(q => insertQuestion(q)));
-  return tx(questions);
+async function insertQuestionsBulk(questions) {
+  await ready;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const saved = [];
+    for (const q of questions) {
+      const { rows: posRows } = await client.query('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM questions');
+      const position = posRows[0].p;
+      await client.query(
+        'INSERT INTO questions (id, text, type, options, depends_on, position) VALUES ($1, $2, $3, $4, $5, $6)',
+        [q.id, q.text, q.type, JSON.stringify(q.options), q.dependsOn ? JSON.stringify(q.dependsOn) : null, position]
+      );
+      const { rows } = await client.query('SELECT * FROM questions WHERE id = $1', [q.id]);
+      saved.push(rowToQuestion(rows[0]));
+    }
+    await client.query('COMMIT');
+    return saved;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
-function getQuestion(id) {
-  const row = db.prepare('SELECT * FROM questions WHERE id = ?').get(id);
-  return row ? rowToQuestion(row) : null;
+async function getQuestion(id) {
+  await ready;
+  const { rows } = await pool.query('SELECT * FROM questions WHERE id = $1', [id]);
+  return rows[0] ? rowToQuestion(rows[0]) : null;
 }
 
-function updateQuestion(id, fields) {
-  const existing = getQuestion(id);
+async function updateQuestion(id, fields) {
+  await ready;
+  const existing = await getQuestion(id);
   if (!existing) return null;
   const merged = { ...existing, ...fields };
-  db.prepare('UPDATE questions SET text = ?, type = ?, options = ? WHERE id = ?')
-    .run(merged.text, merged.type, JSON.stringify(merged.options), id);
+  await pool.query(
+    'UPDATE questions SET text = $1, type = $2, options = $3 WHERE id = $4',
+    [merged.text, merged.type, JSON.stringify(merged.options), id]
+  );
   return getQuestion(id);
 }
 
-function deleteQuestion(id) {
-  db.prepare('DELETE FROM questions WHERE id = ?').run(id);
+async function deleteQuestion(id) {
+  await ready;
+  await pool.query('DELETE FROM questions WHERE id = $1', [id]);
 }
 
 function rowToQuestion(row) {
@@ -73,48 +113,63 @@ function rowToQuestion(row) {
 }
 
 /* ---------------------------- Responses ----------------------------------- */
-function listResponses() {
-  return db.prepare('SELECT * FROM responses ORDER BY rowid ASC').all().map(rowToResponse);
+async function listResponses() {
+  await ready;
+  const { rows } = await pool.query('SELECT * FROM responses ORDER BY created_at ASC');
+  return rows.map(rowToResponse);
 }
 
-function getResponse(id) {
-  const row = db.prepare('SELECT * FROM responses WHERE id = ?').get(id);
-  return row ? rowToResponse(row) : null;
+async function getResponse(id) {
+  await ready;
+  const { rows } = await pool.query('SELECT * FROM responses WHERE id = $1', [id]);
+  return rows[0] ? rowToResponse(rows[0]) : null;
 }
 
-function insertResponse(id, answers) {
-  db.prepare('INSERT INTO responses (id, answers) VALUES (?, ?)').run(id, JSON.stringify(answers || {}));
+async function insertResponse(id, answers) {
+  await ready;
+  await pool.query('INSERT INTO responses (id, answers) VALUES ($1, $2)', [id, JSON.stringify(answers || {})]);
   return getResponse(id);
 }
 
-function updateResponse(id, answers) {
-  const existing = getResponse(id);
+async function updateResponse(id, answers) {
+  await ready;
+  const existing = await getResponse(id);
   if (!existing) return null;
-  db.prepare('UPDATE responses SET answers = ? WHERE id = ?').run(JSON.stringify(answers), id);
+  await pool.query('UPDATE responses SET answers = $1 WHERE id = $2', [JSON.stringify(answers), id]);
   return getResponse(id);
 }
 
-function deleteResponse(id) {
-  db.prepare('DELETE FROM responses WHERE id = ?').run(id);
+async function deleteResponse(id) {
+  await ready;
+  await pool.query('DELETE FROM responses WHERE id = $1', [id]);
 }
 
 function rowToResponse(row) {
-  return { id: row.id, createdAt: row.created_at, answers: JSON.parse(row.answers) };
+  const createdAt = row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at;
+  return { id: row.id, createdAt, answers: JSON.parse(row.answers) };
 }
 
 /* ---------------------------- Config --------------------------------------- */
-function getConfig(key, fallback) {
-  const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
-  return row ? JSON.parse(row.value) : fallback;
+async function getConfig(key, fallback) {
+  await ready;
+  const { rows } = await pool.query('SELECT value FROM config WHERE key = $1', [key]);
+  return rows[0] ? JSON.parse(rows[0].value) : fallback;
 }
 
-function setConfig(key, value) {
-  db.prepare('INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(key, JSON.stringify(value));
+async function setConfig(key, value) {
+  await ready;
+  await pool.query(
+    'INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+    [key, JSON.stringify(value)]
+  );
+}
+
+async function close() {
+  await pool.end();
 }
 
 module.exports = {
   listQuestions, insertQuestion, insertQuestionsBulk, getQuestion, updateQuestion, deleteQuestion,
   listResponses, getResponse, insertResponse, updateResponse, deleteResponse,
-  getConfig, setConfig
+  getConfig, setConfig, close
 };

@@ -2,6 +2,7 @@ const express = require('express');
 const XLSX = require('xlsx');
 const db = require('../db');
 const stats = require('../stats');
+const asyncHandler = require('../asyncHandler');
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -11,20 +12,20 @@ function fmtAnswer(v) { return Array.isArray(v) ? v.join(' | ') : (v || ''); }
 module.exports = function exportRouter() {
   const router = express.Router();
 
-  router.get('/csv', (req, res) => {
-    const questions = db.listQuestions().filter(q => q.options && q.options.length >= 2);
-    const responses = db.listResponses();
+  router.get('/csv', asyncHandler(async (req, res) => {
+    const questions = (await db.listQuestions()).filter(q => q.options && q.options.length >= 2);
+    const responses = await db.listResponses();
     const headers = ['encuesta', ...questions.map(q => q.text)];
     const rows = responses.map((r, i) => [i + 1, ...questions.map(q => fmtAnswer(r.answers[q.id]))]);
     const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="respuestas-encuesta.csv"');
     res.send(csv);
-  });
+  }));
 
-  router.get('/excel', (req, res) => {
-    const questions = db.listQuestions().filter(q => q.options && q.options.length >= 2);
-    const responses = db.listResponses();
+  router.get('/excel', asyncHandler(async (req, res) => {
+    const questions = (await db.listQuestions()).filter(q => q.options && q.options.length >= 2);
+    const responses = await db.listResponses();
     const rawData = [['Encuesta', ...questions.map(q => q.text)]];
     responses.forEach((r, i) => rawData.push([i + 1, ...questions.map(q => fmtAnswer(r.answers[q.id]))]));
     const wb = XLSX.utils.book_new();
@@ -43,11 +44,11 @@ module.exports = function exportRouter() {
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="analisis-encuesta.xlsx"');
     res.send(buffer);
-  });
+  }));
 
-  router.get('/word', (req, res) => {
-    const questions = db.listQuestions().filter(q => q.options && q.options.length >= 2);
-    const responses = db.listResponses();
+  router.get('/word', asyncHandler(async (req, res) => {
+    const questions = (await db.listQuestions()).filter(q => q.options && q.options.length >= 2);
+    const responses = await db.listResponses();
     const parts = stats.conclusionParts(questions, responses);
     const lines = stats.conclusionLines(parts, responses.length);
 
@@ -69,7 +70,7 @@ module.exports = function exportRouter() {
     res.setHeader('Content-Type', 'application/msword');
     res.setHeader('Content-Disposition', 'attachment; filename="analisis-encuesta.doc"');
     res.send(html);
-  });
+  }));
 
   // PDF is generated client-side (it embeds the live chart canvases, which only exist in the browser).
   return router;

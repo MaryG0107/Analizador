@@ -1,9 +1,11 @@
+require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const db = require('./db');
+const asyncHandler = require('./asyncHandler');
 
 const app = express();
 const server = http.createServer(app);
@@ -18,15 +20,15 @@ app.use('/api/responses', require('./routes/responses')(io));
 app.use('/api/import', require('./routes/import')());
 app.use('/api/export', require('./routes/export')());
 
-app.get('/api/config', (req, res) => {
-  res.json({ target: db.getConfig('target', 100) });
-});
+app.get('/api/config', asyncHandler(async (req, res) => {
+  res.json({ target: await db.getConfig('target', 100) });
+}));
 
-app.put('/api/config', (req, res) => {
-  if (typeof req.body.target === 'number') db.setConfig('target', req.body.target);
+app.put('/api/config', asyncHandler(async (req, res) => {
+  if (typeof req.body.target === 'number') await db.setConfig('target', req.body.target);
   io.emit('config:changed');
-  res.json({ target: db.getConfig('target', 100) });
-});
+  res.json({ target: await db.getConfig('target', 100) });
+}));
 
 io.on('connection', socket => {
   socket.emit('connected', { message: 'Conectado al servidor de encuestas en tiempo real' });
