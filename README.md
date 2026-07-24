@@ -66,4 +66,16 @@ Socket.IO (`questions:changed`, `responses:changed`, `config:changed`).
 Cada navegador vuelve a pedir los datos actualizados y redibuja el
 dashboard — asi todos ven los mismos numeros al instante.
 
-# anlizadore-encuesta
+## 📊 Evidencias de Calidad (QA/DevOps)
+
+- **GitHub Project (tablero de CTQs):** [analisis-de-encuesta](https://github.com/users/MaryG0107/projects/1)
+- **Matriz CTQ:** [docs/quality/CTQ.md](docs/quality/CTQ.md)
+- **Definition of Done:** [docs/quality/DoD.md](docs/quality/DoD.md)
+- **Quality Gate (workflow):** [.github/workflows/quality-gate.yml](.github/workflows/quality-gate.yml)
+- **Pull Request de validación:** [#4 - Quality baseline: CTQ, DoD y Quality Gate inicial](https://github.com/MaryG0107/Analizador/pull/4)
+- **Resultado del Quality Gate:** ✅ Ejecutado exitosamente (1 successful check) en el PR #4.
+
+### Issues relacionados a CTQs
+- [#1 - CTQ-001: Envío confiable del formulario](https://github.com/MaryG0107/Analizador/issues/1)
+- [#2 - CTQ-002: Persistencia de datos en base de datos](https://github.com/MaryG0107/Analizador/issues/2)
+- [#3 - CTQ-003: Tiempo de carga del panel de resultados](https://github.com/MaryG0107/Analizador/issues/3)
