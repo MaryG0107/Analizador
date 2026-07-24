@@ -14,20 +14,20 @@ const Utils = {
 
 /* ---------------------------- Question types (Open/Closed) ---------------- */
 class QuestionType {
-  constructor(key, label, chartKind, isMultiSelect) { this.key = key; this.label = label; this.chartKind = chartKind; this.isMultiSelect = isMultiSelect; }
+  constructor(key, label, isMultiSelect) { this.key = key; this.label = label; this.isMultiSelect = isMultiSelect; }
   isSelected(answer, option) { return answer === option; }
   applyAnswer(answer, option) { return option; }
 }
-class YesNoQuestionType extends QuestionType { constructor() { super('yesno', 'Si / No', 'doughnut', false); } }
+class YesNoQuestionType extends QuestionType { constructor() { super('yesno', 'Si / No', false); } }
 class MultiQuestionType extends QuestionType {
-  constructor() { super('multi', 'Multiple (varias opciones)', 'bar', true); }
+  constructor() { super('multi', 'Multiple (varias opciones)', true); }
   isSelected(answer, option) { return Array.isArray(answer) && answer.includes(option); }
   applyAnswer(answer, option) {
     const current = Array.isArray(answer) ? answer : [];
     return current.includes(option) ? current.filter(o => o !== option) : [...current, option];
   }
 }
-class McQuestionType extends QuestionType { constructor() { super('mc', 'Opcion multiple', 'bar', false); } }
+class McQuestionType extends QuestionType { constructor() { super('mc', 'Opcion multiple', false); } }
 class QuestionTypeRegistry {
   constructor(types) { this.types = types; }
   get(key) { return this.types.find(t => t.key === key) || this.types.find(t => t.key === 'mc'); }
@@ -39,9 +39,14 @@ const QUESTION_TYPES = new QuestionTypeRegistry([new YesNoQuestionType(), new Mu
 class ApiClient {
   async _json(url, opts) {
     const res = await fetch(url, opts);
+    if (res.status === 401) { const err = new Error('unauthorized'); err.status = 401; throw err; }
     if (!res.ok) throw new Error(`${opts?.method || 'GET'} ${url} -> ${res.status}`);
     return res.status === 204 ? null : res.json();
   }
+  getSession() { return this._json('/api/session'); }
+  login(username, password) { return this._json('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) }); }
+  logout() { return this._json('/api/logout', { method: 'POST' }); }
+
   getQuestions() { return this._json('/api/questions'); }
   createQuestion(q) { return this._json('/api/questions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(q) }); }
   bulkCreateQuestions(questions) { return this._json('/api/questions/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ questions }) }); }
@@ -69,7 +74,7 @@ class ApiClient {
 class SurveyStore {
   constructor(api, registry) {
     this.api = api; this.registry = registry;
-    this.state = { questions: [], target: 100, responses: [], tab: 'config', captureIndex: 0, wizardStep: 0, loaded: false, draftQuestions: null, online: true };
+    this.state = { questions: [], target: 100, responses: [], tab: 'config', captureIndex: 0, loaded: false, draftQuestions: null, online: true, draft: {} };
   }
 
   async loadAll() {
@@ -78,10 +83,8 @@ class SurveyStore {
     this.state.responses = responses;
     this.state.target = config.target;
     if (this.state.captureIndex > this.state.responses.length) this.state.captureIndex = this.state.responses.length;
+    if (!this.state.loaded) this.syncDraftFromCurrent();
     this.state.loaded = true;
-    if (this.state.questions.length > 0 && this.state.tab === 'config' && this.state._autoAdvanced !== true) {
-      // Only auto-jump to capture on first load, not on every realtime refresh.
-    }
   }
 
   usableQuestions() { return this.state.questions.filter(q => q.options && q.options.length >= 2); }
@@ -92,37 +95,36 @@ class SurveyStore {
   }
   visibleQuestions(answers) { return this.usableQuestions().filter(q => this.isApplicable(q, answers)); }
 
-  currentAnswers() {
+  currentAnswers() { return this.state.draft; }
+
+  isEditingExisting() { return this.state.captureIndex < this.state.responses.length; }
+
+  syncDraftFromCurrent() {
     const r = this.state.responses[this.state.captureIndex];
-    return r ? r.answers : {};
+    this.state.draft = r ? JSON.parse(JSON.stringify(r.answers)) : {};
   }
 
-  async ensureCurrentResponse() {
-    if (this.state.responses[this.state.captureIndex]) return this.state.responses[this.state.captureIndex];
-    const created = await this.api.createResponse({});
-    this.state.responses[this.state.captureIndex] = created;
-    return created;
-  }
-
-  async applyAnswer(questionId, option) {
+  setDraftAnswer(questionId, option) {
     const q = this.state.questions.find(q => q.id === questionId);
     const type = this.registry.get(q.type);
-    const response = await this.ensureCurrentResponse();
-    response.answers[questionId] = type.applyAnswer(response.answers[questionId], option);
-    await this.api.updateResponse(response.id, response.answers);
+    this.state.draft[questionId] = type.applyAnswer(this.state.draft[questionId], option);
   }
 
-  wizardNext() { this.state.wizardStep++; }
-  wizardPrev() { this.state.wizardStep = Math.max(0, this.state.wizardStep - 1); }
-
-  async saveAndAdvance() {
-    this.state.captureIndex = this.state.responses.length;
-    this.state.wizardStep = 0;
+  async submitDraft() {
+    if (this.isEditingExisting()) {
+      const existing = this.state.responses[this.state.captureIndex];
+      this.state.responses[this.state.captureIndex] = await this.api.updateResponse(existing.id, this.state.draft);
+    } else {
+      const created = await this.api.createResponse(this.state.draft);
+      this.state.responses.push(created);
+      this.state.captureIndex = this.state.responses.length;
+    }
+    this.syncDraftFromCurrent();
   }
 
   goTo(idx) {
     this.state.captureIndex = Math.max(0, Math.min(idx, this.state.responses.length));
-    this.state.wizardStep = 0;
+    this.syncDraftFromCurrent();
   }
 
   async deleteCurrent() {
@@ -130,6 +132,8 @@ class SurveyStore {
     if (!r) return;
     await this.api.deleteResponse(r.id);
     this.state.responses.splice(this.state.captureIndex, 1);
+    if (this.state.captureIndex > this.state.responses.length) this.state.captureIndex = this.state.responses.length;
+    this.syncDraftFromCurrent();
   }
 
   async setTarget(val) {
@@ -190,6 +194,14 @@ class StatsCalculator {
       return { q, top, topPct, answered, applicable, counts };
     });
   }
+  questionInsight(p) {
+    if (p.answered === 0) return 'Aun no hay respuestas para esta pregunta.';
+    if (p.topPct >= 70) return `Consenso claro: ${p.topPct}% eligio "${p.top[0]}".`;
+    if (p.topPct < 40) return `Las respuestas estan muy divididas entre las opciones, sin una tendencia clara.`;
+    if (p.topPct < 55) return `Opiniones divididas; la mas elegida es "${p.top[0]}" con ${p.topPct}%.`;
+    return `Tendencia moderada hacia "${p.top[0]}" (${p.topPct}%).`;
+  }
+
   conclusionLines(parts, total) {
     const strong = parts.filter(p => p.topPct >= 70);
     const split = parts.filter(p => p.topPct < 55);
@@ -201,48 +213,81 @@ class StatsCalculator {
   }
 }
 
-/* ---------------------------- Chart renderers (Open/Closed) --------------- */
-class ChartRenderer { render() { throw new Error('not implemented'); } }
-class BarChartRenderer extends ChartRenderer {
-  render(canvasId, counts, compact) {
+/* ---------------------------- Chart preferences (per-question, per-browser) */
+const ChartPrefs = {
+  KEY: 'analizador_chart_prefs_v1',
+  KINDS: [{ key: 'bar', label: 'Barras' }, { key: 'horizontalBar', label: 'Barras horizontales' }, { key: 'pie', label: 'Pastel' }, { key: 'doughnut', label: 'Dona' }, { key: 'line', label: 'Linea' }],
+  load() { try { return JSON.parse(localStorage.getItem(this.KEY)) || {}; } catch (e) { return {}; } },
+  save(all) { localStorage.setItem(this.KEY, JSON.stringify(all)); },
+  defaultKind(question) { return question.type === 'yesno' ? 'doughnut' : 'bar'; },
+  get(question) {
+    const p = this.load()[question.id] || {};
+    return { kind: p.kind || this.defaultKind(question), colors: p.colors || {} };
+  },
+  colorFor(question, option, index) {
+    const { colors } = this.get(question);
+    return colors[option] || PALETTE[index % PALETTE.length];
+  },
+  setKind(questionId, kind) {
+    const all = this.load();
+    all[questionId] = { ...(all[questionId] || {}), kind };
+    this.save(all);
+  },
+  setColor(questionId, option, color) {
+    const all = this.load();
+    const entry = all[questionId] || {};
+    entry.colors = { ...(entry.colors || {}), [option]: color };
+    all[questionId] = entry;
+    this.save(all);
+  }
+};
+
+/* ---------------------------- Chart rendering ------------------------------ */
+class ChartPool {
+  constructor() { this.instances = []; this.byId = new Map(); }
+  destroyAll() { this.instances.forEach(c => c && c.destroy()); this.instances = []; this.byId.clear(); }
+  get(canvasId) { return this.byId.get(canvasId); }
+  render(canvasId, question, counts, compact) {
     const ctx = document.getElementById(canvasId);
-    if (!ctx) return null;
+    if (!ctx) return;
+    const { kind } = ChartPrefs.get(question);
     const labels = Object.keys(counts);
-    return new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets: [{ data: Object.values(counts), backgroundColor: labels.map((_, i) => PALETTE[i % PALETTE.length]), borderRadius: 4, maxBarThickness: compact ? 26 : 40 }] },
+    const colors = labels.map((label, i) => ChartPrefs.colorFor(question, label, i));
+    const isPieLike = kind === 'pie' || kind === 'doughnut';
+    const horizontal = kind === 'horizontalBar' || (compact && kind === 'bar');
+    const labelSize = compact ? 11 : 15;
+    const chart = new Chart(ctx, {
+      type: kind === 'horizontalBar' ? 'bar' : kind,
+      plugins: [ChartDataLabels],
+      data: { labels, datasets: [{ data: Object.values(counts), backgroundColor: colors, borderRadius: isPieLike ? 0 : 4, borderWidth: isPieLike ? 2 : 0, borderColor: '#fff', maxBarThickness: compact ? 26 : 40 }] },
       options: {
-        indexAxis: compact ? 'y' : 'x',
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { beginAtZero: compact, ticks: { precision: 0, font: { family: 'IBM Plex Mono', size: compact ? 10 : 11 } } },
-          y: { beginAtZero: !compact, ticks: { font: { family: 'IBM Plex Sans', size: compact ? 10 : 12 }, autoSkip: false } }
+        indexAxis: horizontal ? 'y' : 'x',
+        responsive: true, maintainAspectRatio: false, devicePixelRatio: 2,
+        layout: { padding: isPieLike ? 0 : { top: compact ? 14 : 22 } },
+        plugins: {
+          legend: { display: isPieLike, position: 'bottom', labels: { font: { family: 'IBM Plex Sans', size: labelSize }, boxWidth: 14, padding: 12 } },
+          datalabels: {
+            display: ctx => !!ctx.dataset.data[ctx.dataIndex],
+            color: isPieLike ? '#fff' : '#1E2A24',
+            anchor: isPieLike ? 'center' : 'end',
+            align: isPieLike ? 'center' : 'end',
+            offset: isPieLike ? 0 : 4,
+            font: { family: 'IBM Plex Sans', size: labelSize, weight: '600' },
+            formatter: (value, ctx) => {
+              const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+              return total ? Math.round((value / total) * 100) + '%' : '';
+            }
+          }
+        },
+        scales: isPieLike ? {} : {
+          x: { beginAtZero: true, ticks: { precision: 0, font: { family: 'IBM Plex Mono', size: compact ? 11 : 13 } } },
+          y: { beginAtZero: true, ticks: { font: { family: 'IBM Plex Sans', size: compact ? 11 : 14 }, autoSkip: false } }
         }
       }
     });
+    this.instances.push(chart);
+    this.byId.set(canvasId, chart);
   }
-}
-class DoughnutChartRenderer extends ChartRenderer {
-  render(canvasId, counts) {
-    const ctx = document.getElementById(canvasId);
-    if (!ctx) return null;
-    const labels = Object.keys(counts);
-    return new Chart(ctx, {
-      type: 'doughnut',
-      data: { labels, datasets: [{ data: Object.values(counts), backgroundColor: labels.map((_, i) => PALETTE[i % PALETTE.length]), borderWidth: 2, borderColor: '#fff' }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { font: { family: 'IBM Plex Sans', size: 11 }, boxWidth: 10, padding: 8 } } } }
-    });
-  }
-}
-class ChartRendererFactory {
-  constructor(registry) { this.registry = registry; this.renderers = { bar: new BarChartRenderer(), doughnut: new DoughnutChartRenderer() }; }
-  forQuestion(question) { return this.renderers[this.registry.get(question.type).chartKind] || this.renderers.bar; }
-}
-class ChartPool {
-  constructor(factory) { this.factory = factory; this.instances = []; }
-  destroyAll() { this.instances.forEach(c => c && c.destroy()); this.instances = []; }
-  render(canvasId, question, counts, compact) { this.instances.push(this.factory.forQuestion(question).render(canvasId, counts, compact)); }
 }
 
 /* ---------------------------- Views ---------------------------------------- */
@@ -374,17 +419,18 @@ class SurveyViews {
     if (incomplete.length > 0) return `<div class="empty">Faltan opciones de respuesta en ${incomplete.length} pregunta(s). Ve a la pestana <strong>Preguntas</strong> para completarlas.</div>`;
 
     const total = s.responses.length;
-    const isNewSurvey = s.captureIndex >= total;
+    const isNewSurvey = !this.store.isEditingExisting();
     const pct = Math.min(100, Math.round((total / s.target) * 100));
     const answers = this.store.currentAnswers();
     const visible = this.store.visibleQuestions(answers);
-    const step = Math.min(s.wizardStep, Math.max(0, visible.length - 1));
-    const q = visible[step];
-    const isLastStep = step >= visible.length - 1;
 
-    if (!q) return `<div class="empty">No hay preguntas aplicables para esta encuesta.</div>`;
+    if (visible.length === 0) return `<div class="empty">No hay preguntas aplicables para esta encuesta.</div>`;
 
-    const type = this.registry.get(q.type);
+    const answeredCount = visible.filter(q => {
+      const v = answers[q.id];
+      return Array.isArray(v) ? v.length > 0 : !!v;
+    }).length;
+
     return `
     <div class="capture-nav">
       <div class="tally">Encuesta ${s.captureIndex + 1} ${isNewSurvey ? '(nueva)' : ''} - ${total} de ${s.target}<span class="bar"><i style="width:${pct}%"></i></span></div>
@@ -394,29 +440,27 @@ class SurveyViews {
       </div>
     </div>
     <div class="capture-layout">
-      <div class="card">
-        <div class="wizard-progress"><span>Pregunta ${step + 1} de ${visible.length}</span>${q.dependsOn ? '<span>pregunta condicional</span>' : ''}</div>
-        <div class="wizard-track"><i style="width:${Math.round(((step + 1) / visible.length) * 100)}%"></i></div>
-        <div class="qblock">
-          <div class="qname">${Utils.escapeHtml(q.text)}</div>
-          ${type.isMultiSelect ? '<div class="qhint">puede marcar varias opciones</div>' : ''}
-          <div class="opts-grid">
-            ${q.options.map((o, i) => {
-              const selected = type.isSelected(answers[q.id], o);
-              return `<div class="opt-pill ${selected ? 'selected' : ''}" onclick="App.applyAnswer('${q.id}', '${Utils.escapeAttr(o)}')">${i < 9 ? `<span class="kbd">${i + 1}</span>` : ''}${Utils.escapeHtml(o)}</div>`;
-            }).join('')}
-          </div>
-        </div>
+      <div class="card survey-form">
+        <div class="form-progress muted">${answeredCount} de ${visible.length} preguntas respondidas</div>
+        ${visible.map(q => {
+          const type = this.registry.get(q.type);
+          return `<div class="qblock form-qblock">
+            <div class="qname">${Utils.escapeHtml(q.text)}</div>
+            ${type.isMultiSelect ? '<div class="qhint">puede marcar varias opciones</div>' : ''}
+            <div class="opts-grid">
+              ${q.options.map(o => {
+                const selected = type.isSelected(answers[q.id], o);
+                return `<div class="opt-pill ${selected ? 'selected' : ''}" onclick="App.setDraftAnswer('${q.id}', '${Utils.escapeAttr(o)}')">${Utils.escapeHtml(o)}</div>`;
+              }).join('')}
+            </div>
+          </div>`;
+        }).join('')}
         <div class="capture-actions">
           <div style="display:flex;gap:8px;">
-            <button onclick="App.wizardPrev()" ${step <= 0 ? 'disabled' : ''}>Anterior</button>
-            ${!isNewSurvey && step === 0 ? `<button class="ghost danger-outline" onclick="App.deleteCurrent()">Eliminar esta encuesta</button>` : ''}
+            ${!isNewSurvey ? `<button class="ghost danger-outline" onclick="App.deleteCurrent()">Eliminar esta encuesta</button>` : ''}
           </div>
-          ${isLastStep
-            ? `<button class="primary" onclick="App.finishSurvey()">Guardar y ${isNewSurvey ? 'nueva' : 'siguiente'} encuesta -></button>`
-            : `<button class="primary" onclick="App.wizardNext()">Siguiente pregunta -></button>`}
+          <button class="primary" onclick="App.submitDraft()">${isNewSurvey ? 'Enviar respuestas' : 'Guardar cambios'} -></button>
         </div>
-        <div class="kbd-hint">Atajos: teclas 1-9 eligen opcion &middot; Enter avanza &middot; Flecha izquierda retrocede</div>
       </div>
       ${this.liveDashboard()}
     </div>`;
@@ -430,24 +474,45 @@ class SurveyViews {
 
     const parts = this.stats.conclusionParts(s.questions, s.responses);
     const conclusionLines = this.stats.conclusionLines(parts, s.responses.length);
-    const cards = parts.map((p, i) => `
+    const cards = parts.map((p, i) => {
+      const { kind } = ChartPrefs.get(p.q);
+      const options = Object.keys(p.counts);
+      const breakdown = options.map((opt, oi) => {
+        const count = p.counts[opt];
+        const pct = p.answered ? Math.round((count / p.answered) * 100) : 0;
+        return `<div class="breakdown-row">
+          <label class="swatch"><input type="color" value="${ChartPrefs.colorFor(p.q, opt, oi)}" onchange="App.setChartColor('${p.q.id}', '${Utils.escapeAttr(opt)}', this.value)"></label>
+          <span class="breakdown-label">${Utils.escapeHtml(opt)}</span>
+          <span class="breakdown-bar"><i style="width:${pct}%;background:${ChartPrefs.colorFor(p.q, opt, oi)};"></i></span>
+          <span class="breakdown-val">${count} (${pct}%)</span>
+        </div>`;
+      }).join('');
+      return `
       <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;">
           <h3 style="font-size:14px;">${Utils.escapeHtml(p.q.text)}<span class="badge-type">${this.registry.get(p.q.type).label}</span></h3>
           <span class="badge-warn">${p.answered} de ${p.applicable} respondieron</span>
         </div>
+        <div class="chart-controls">
+          <label style="display:inline;text-transform:none;margin:0;">Tipo de grafica</label>
+          <select onchange="App.setChartKind('${p.q.id}', this.value)">
+            ${ChartPrefs.KINDS.map(k => `<option value="${k.key}" ${kind === k.key ? 'selected' : ''}>${k.label}</option>`).join('')}
+          </select>
+        </div>
         <div class="chart-wrap"><canvas id="chart-${i}"></canvas></div>
-        <div class="stat-line"><span>Respuesta mas frecuente</span><span><strong>${Utils.escapeHtml(p.top[0])}</strong> (${p.topPct}%)</span></div>
-      </div>`).join('');
+        <div class="answer-breakdown">${breakdown}</div>
+        <div class="card-insight">${Utils.escapeHtml(this.stats.questionInsight(p))}</div>
+      </div>`;
+    }).join('');
 
     setTimeout(() => parts.forEach((p, i) => this.analysisCharts.render(`chart-${i}`, p.q, p.counts, false)), 0);
 
     return `
     <div class="toolbar">
       <button onclick="App.exportAs('csv')">CSV</button>
-      <button onclick="App.exportAs('excel')">Excel</button>
+      <button onclick="App.exportExcel()">Excel</button>
       <button onclick="App.exportPdf()">PDF</button>
-      <button onclick="App.exportAs('word')">Word</button>
+      <button onclick="App.exportWord()">Word</button>
     </div>
     <div class="card conclusion"><h3 style="margin-bottom:10px;">Conclusion general</h3>${conclusionLines.map(l => `<p>${Utils.escapeHtml(l)}</p>`).join('')}</div>
     ${cards}`;
@@ -457,25 +522,62 @@ class SurveyViews {
     if (!this.store.state.loaded) return `<div class="empty">Cargando...</div>`;
     const s = this.store.state;
     const body = s.tab === 'config' ? this.config() : s.tab === 'capture' ? this.capture() : this.analysis();
-    return `<div class="header"><h1>Analizador de encuestas</h1><div class="sub"><span class="live-dot ${s.online ? '' : 'offline'}"></span>${s.online ? 'en vivo' : 'sin conexion'} &middot; ${s.responses.length} respuestas guardadas</div></div>${this.tabs()}${body}`;
+    return `<div class="header"><h1>Analizador de encuestas</h1><div class="sub"><span class="live-dot ${s.online ? '' : 'offline'}"></span>${s.online ? 'en vivo' : 'sin conexion'} &middot; ${s.responses.length} respuestas guardadas <button class="ghost" onclick="App.logout()">Cerrar sesion</button></div></div>${this.tabs()}${body}`;
+  }
+
+  login(errorMsg) {
+    return `<div class="login-wrap">
+      <div class="card login-card">
+        <h1 style="font-size:20px;margin-bottom:4px;">Analizador de encuestas</h1>
+        <p class="muted" style="margin:0 0 18px;">Inicia sesion para continuar.</p>
+        <form onsubmit="event.preventDefault(); App.login();">
+          <label>Usuario</label>
+          <input type="text" id="login-user" autocomplete="username" autofocus>
+          <label style="margin-top:12px;">Contrasena</label>
+          <input type="password" id="login-pass" autocomplete="current-password">
+          ${errorMsg ? `<p style="color:var(--red);font-size:12px;margin:10px 0 0;">${Utils.escapeHtml(errorMsg)}</p>` : ''}
+          <button class="primary" type="submit" style="width:100%;margin-top:16px;">Entrar</button>
+        </form>
+      </div>
+    </div>`;
   }
 }
 
 /* ---------------------------- App (composition root + DOM wiring) --------- */
 const App = {
-  init() {
+  async init() {
     this.el = document.getElementById('app');
     this.registry = QUESTION_TYPES;
     this.api = new ApiClient();
     this.store = new SurveyStore(this.api, this.registry);
     this.stats = new StatsCalculator(this.store);
-    const factory = new ChartRendererFactory(this.registry);
-    this.analysisCharts = new ChartPool(factory);
-    this.liveCharts = new ChartPool(factory);
+    this.analysisCharts = new ChartPool();
+    this.liveCharts = new ChartPool();
     this.views = new SurveyViews(this.store, this.stats, this.registry, this.analysisCharts, this.liveCharts);
-    document.addEventListener('keydown', e => this.handleKeydown(e));
-    this.reload(true);
-    this.wireRealtime();
+
+    let authenticated = false;
+    try { authenticated = (await this.api.getSession()).authenticated; } catch (e) {}
+    if (authenticated) { await this.reload(true); this.wireRealtime(); }
+    else { this.el.innerHTML = this.views.login(); }
+  },
+
+  async login() {
+    const username = document.getElementById('login-user').value;
+    const password = document.getElementById('login-pass').value;
+    try {
+      await this.api.login(username, password);
+      await this.reload(true);
+      this.wireRealtime();
+    } catch (e) {
+      this.el.innerHTML = this.views.login('Usuario o contrasena incorrectos.');
+    }
+  },
+
+  async logout() {
+    if (this.socket) { this.socket.disconnect(); this.socket = null; }
+    try { await this.api.logout(); } catch (e) {}
+    this.store.state.loaded = false;
+    this.el.innerHTML = this.views.login();
   },
 
   async reload(firstLoad) {
@@ -484,13 +586,15 @@ const App = {
       this.store.state.online = true;
       if (firstLoad && this.store.state.questions.length > 0) this.store.state.tab = 'capture';
     } catch (e) {
+      if (e.status === 401) { this.el.innerHTML = this.views.login('Tu sesion expiro, inicia sesion de nuevo.'); return; }
       this.store.state.online = false;
     }
     this.render();
   },
 
   wireRealtime() {
-    const socket = io();
+    this.socket = io();
+    const socket = this.socket;
     socket.on('connect', () => { this.store.state.online = true; this.render(); });
     socket.on('disconnect', () => { this.store.state.online = false; this.render(); });
     socket.on('questions:changed', () => this.reload(false));
@@ -499,19 +603,6 @@ const App = {
   },
 
   render() { this.el.innerHTML = this.views.root(); },
-
-  handleKeydown(e) {
-    if (this.store.state.tab !== 'capture') return;
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-    const digit = parseInt(e.key);
-    if (!isNaN(digit) && digit >= 1 && digit <= 9) {
-      const answers = this.store.currentAnswers();
-      const visible = this.store.visibleQuestions(answers);
-      const q = visible[Math.min(this.store.state.wizardStep, visible.length - 1)];
-      if (q && q.options[digit - 1]) this.applyAnswer(q.id, q.options[digit - 1]);
-    } else if (e.key === 'Enter') { this.wizardNext(); }
-    else if (e.key === 'ArrowLeft') { this.wizardPrev(); }
-  },
 
   setTab(id) { this.store.state.tab = id; this.render(); },
 
@@ -541,17 +632,13 @@ const App = {
   async confirmImport() { await this.store.confirmImport(); await this.reload(false); },
   cancelImport() { this.store.cancelImport(); this.render(); },
 
-  async applyAnswer(qId, opt) { await this.store.applyAnswer(qId, opt); this.render(); },
-  wizardNext() {
-    const answers = this.store.currentAnswers();
-    const visible = this.store.visibleQuestions(answers);
-    if (this.store.state.wizardStep >= visible.length - 1) this.finishSurvey();
-    else { this.store.wizardNext(); this.render(); }
-  },
-  wizardPrev() { this.store.wizardPrev(); this.render(); },
-  async finishSurvey() { await this.store.saveAndAdvance(); this.render(); },
+  setDraftAnswer(qId, opt) { this.store.setDraftAnswer(qId, opt); this.render(); },
+  async submitDraft() { await this.store.submitDraft(); this.render(); },
   goTo(idx) { this.store.goTo(idx); this.render(); },
   async deleteCurrent() { await this.store.deleteCurrent(); this.render(); },
+
+  setChartKind(qId, kind) { ChartPrefs.setKind(qId, kind); this.render(); },
+  setChartColor(qId, opt, color) { ChartPrefs.setColor(qId, opt, color); this.render(); },
 
   exportAs(kind) { window.location.href = `/api/export/${kind}`; },
 
@@ -582,11 +669,131 @@ const App = {
         if (y > 280) { doc.addPage(); y = 18; }
         doc.text(`${opt}: ${count} (${pct}%)`, 18, y); y += 5;
       });
-      const canvas = document.getElementById(`chart-${i}`);
-      if (canvas) { try { if (y > 210) { doc.addPage(); y = 18; } doc.addImage(canvas.toDataURL('image/png'), 'PNG', 14, y, 100, 55); y += 60; } catch (e) {} }
+      y += 1;
+      doc.setFont('helvetica', 'italic');
+      doc.splitTextToSize(this.stats.questionInsight(p), 180).forEach(w => { if (y > 280) { doc.addPage(); y = 18; } doc.text(w, 18, y); y += 5; });
+      doc.setFont('helvetica', 'normal');
+      const chart = this.analysisCharts.get(`chart-${i}`);
+      if (chart) {
+        try {
+          const ratio = chart.canvas.width / chart.canvas.height;
+          const w = 90, h = w / ratio;
+          if (y + h > 285) { doc.addPage(); y = 18; }
+          doc.addImage(chart.toBase64Image(), 'PNG', 14, y, w, h);
+          y += h + 6;
+        } catch (e) {}
+      }
       y += 3;
     });
     doc.save('analisis-encuesta.pdf');
+  },
+
+  exportWord() {
+    const questions = this.store.usableQuestions();
+    const responses = this.store.state.responses;
+    const parts = this.stats.conclusionParts(questions, responses);
+    const lines = this.stats.conclusionLines(parts, responses.length);
+    let html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+    <head><meta charset="utf-8"><title>Analisis de encuesta</title></head>
+    <body style="font-family:Calibri, Arial, sans-serif;">
+    <h1>Analisis de encuesta</h1><p><i>${new Date().toLocaleDateString()}</i></p>
+    <h2>Conclusion general</h2>${lines.map(l => `<p>${Utils.escapeHtml(l)}</p>`).join('')}`;
+    parts.forEach((p, i) => {
+      html += `<h3>${Utils.escapeHtml(p.q.text)}</h3>`;
+      const chart = this.analysisCharts.get(`chart-${i}`);
+      if (chart) html += `<p><img src="${chart.toBase64Image()}" width="480"></p>`;
+      html += `<table border="1" cellspacing="0" cellpadding="5" style="border-collapse:collapse;width:100%;"><tr><th align="left">Opcion</th><th align="left">Conteo</th><th align="left">Porcentaje</th></tr>`;
+      Object.entries(p.counts).forEach(([opt, count]) => {
+        const pct = p.answered ? Math.round((count / p.answered) * 100) : 0;
+        html += `<tr><td>${Utils.escapeHtml(opt)}</td><td>${count}</td><td>${pct}%</td></tr>`;
+      });
+      html += `</table><p><i>${Utils.escapeHtml(this.stats.questionInsight(p))}</i></p><br/>`;
+    });
+    html += `</body></html>`;
+
+    const blob = new Blob(['﻿', html], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'analisis-encuesta.doc';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
+
+  async exportExcel() {
+    const workbook = new ExcelJS.Workbook();
+    const questions = this.store.usableQuestions();
+    const responses = this.store.state.responses;
+    const parts = this.stats.conclusionParts(questions, responses);
+
+    const dataSheet = workbook.addWorksheet('Respuestas');
+    dataSheet.addRow(['Encuesta', ...questions.map(q => q.text)]).font = { bold: true };
+    responses.forEach((r, i) => {
+      const v = q => { const a = r.answers[q.id]; return Array.isArray(a) ? a.join(' | ') : (a || ''); };
+      dataSheet.addRow([i + 1, ...questions.map(v)]);
+    });
+    dataSheet.columns.forEach(col => { col.width = 30; });
+
+    const summarySheet = workbook.addWorksheet('Resumen');
+    summarySheet.getColumn(1).width = 45;
+    summarySheet.getColumn(2).width = 12;
+    summarySheet.getColumn(3).width = 12;
+    summarySheet.getColumn(5).width = 55;
+
+    const noteCell = summarySheet.getCell(1, 1);
+    noteCell.value = 'Sugerencia: selecciona la tabla Opcion/Conteo/Porcentaje de una pregunta y usa Insertar > Grafico para crear una grafica nativa y editable a partir de esos datos.';
+    noteCell.font = { italic: true, color: { argb: 'FF55625A' }, size: 10 };
+    summarySheet.getRow(1).height = 28;
+    summarySheet.mergeCells(1, 1, 1, 3);
+    noteCell.alignment = { wrapText: true, vertical: 'middle' };
+
+    let row = 3;
+    parts.forEach((p, i) => {
+      const startRow = row;
+      const titleCell = summarySheet.getCell(row, 1);
+      titleCell.value = p.q.text;
+      titleCell.font = { bold: true, size: 12, color: { argb: 'FF12433E' } };
+      row++;
+
+      const headerRow = summarySheet.getRow(row);
+      headerRow.getCell(1).value = 'Opcion'; headerRow.getCell(2).value = 'Conteo'; headerRow.getCell(3).value = 'Porcentaje';
+      headerRow.font = { bold: true };
+      row++;
+
+      Object.entries(p.counts).forEach(([opt, count]) => {
+        const pct = p.answered ? count / p.answered : 0;
+        const r = summarySheet.getRow(row);
+        r.getCell(1).value = opt; r.getCell(2).value = count;
+        r.getCell(3).value = pct; r.getCell(3).numFmt = '0%';
+        row++;
+      });
+
+      const insightCell = summarySheet.getCell(row, 1);
+      insightCell.value = this.stats.questionInsight(p);
+      insightCell.font = { italic: true, color: { argb: 'FF55625A' } };
+      row++;
+
+      let imageRows = 0;
+      const chart = this.analysisCharts.get(`chart-${i}`);
+      if (chart) {
+        try {
+          const ratio = chart.canvas.width / chart.canvas.height;
+          const width = 380, height = Math.round(width / ratio);
+          const base64 = chart.toBase64Image().split(',')[1];
+          const imageId = workbook.addImage({ base64, extension: 'png' });
+          summarySheet.addImage(imageId, { tl: { col: 4, row: startRow - 1 }, ext: { width, height } });
+          imageRows = Math.ceil(height / 20);
+        } catch (e) {}
+      }
+      row = Math.max(row, startRow + imageRows) + 2;
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'analisis-encuesta.xlsx';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 };
 
